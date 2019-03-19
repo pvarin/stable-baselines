@@ -61,7 +61,7 @@ class SAC(OffPolicyRLModel):
         Note: this has no effect on SAC logging for now
     """
 
-    def __init__(self, policy, env, gamma=0.99, learning_rate=3e-4, buffer_size=50000,
+    def __init__(self, policy, env, gamma=0.99, learning_rate=3e-4, damping_coeff=0.0, buffer_size=50000,
                  learning_starts=100, train_freq=1, batch_size=64,
                  tau=0.005, ent_coef='auto', target_update_interval=1,
                  gradient_steps=1, target_entropy='auto', verbose=0, tensorboard_log=None,
@@ -72,6 +72,7 @@ class SAC(OffPolicyRLModel):
 
         self.buffer_size = buffer_size
         self.learning_rate = learning_rate
+        self.damping_coeff = damping_coeff
         self.learning_starts = learning_starts
         self.train_freq = train_freq
         self.batch_size = batch_size
@@ -115,6 +116,11 @@ class SAC(OffPolicyRLModel):
         self.entropy = None
         self.target_params = None
         self.learning_rate_ph = None
+        self.damping_coeff_ph = None
+        self.qf1_old_ph = None
+        self.qf2_old_ph = None
+        self.qf1 = None
+        self.qf2 = None
         self.processed_obs_ph = None
         self.processed_next_obs_ph = None
         self.log_ent_coef = None
@@ -152,6 +158,9 @@ class SAC(OffPolicyRLModel):
                     self.actions_ph = tf.placeholder(tf.float32, shape=(None,) + self.action_space.shape,
                                                      name='actions')
                     self.learning_rate_ph = tf.placeholder(tf.float32, [], name="learning_rate_ph")
+                    self.damping_coeff_ph = tf.placeholder(tf.float32, [], name="damping_coeff_ph")
+                    self.qf1_old_ph = tf.placeholder(tf.float32, shape=(None, 1), name="qf1_old_ph")
+                    self.qf2_old_ph = tf.placeholder(tf.float32, shape=(None, 1), name="qf2_old_ph")
 
                 with tf.variable_scope("model", reuse=False):
                     # Create the policy
@@ -163,7 +172,7 @@ class SAC(OffPolicyRLModel):
                     # this is not used for training
                     self.entropy = tf.reduce_mean(self.policy_tf.entropy)
                     #  Use two Q-functions to improve performance by reducing overestimation bias.
-                    qf1, qf2, value_fn = self.policy_tf.make_critics(self.processed_obs_ph, self.actions_ph,
+                    self.qf1, self.qf2, value_fn = self.policy_tf.make_critics(self.processed_obs_ph, self.actions_ph,
                                                                      create_qf=True, create_vf=True)
                     qf1_pi, qf2_pi, _ = self.policy_tf.make_critics(self.processed_obs_ph,
                                                                     policy_out, create_qf=True, create_vf=False,
@@ -218,6 +227,9 @@ class SAC(OffPolicyRLModel):
                     qf1_loss = 0.5 * tf.reduce_mean((q_backup - qf1) ** 2)
                     qf2_loss = 0.5 * tf.reduce_mean((q_backup - qf2) ** 2)
 
+                    qf1_damping_loss = self.damping_coeff_ph * 0.5 * tf.reduce_mean((qf1 - self.qf1_old_ph) ** 2)
+                    qf2_damping_loss = self.damping_coeff_ph * 0.5 * tf.reduce_mean((qf2 - self.qf2_old_ph) ** 2)
+
                     # Compute the entropy temperature loss
                     # it is used when the entropy coefficient is learned
                     ent_coef_loss, entropy_optimizer = None, None
@@ -241,7 +253,7 @@ class SAC(OffPolicyRLModel):
                     v_backup = tf.stop_gradient(min_qf_pi - self.ent_coef * logp_pi)
                     value_loss = 0.5 * tf.reduce_mean((value_fn - v_backup) ** 2)
 
-                    values_losses = qf1_loss + qf2_loss + value_loss
+                    values_losses = qf1_loss + qf2_loss + value_loss + qf1_damping_loss + qf2_damping_loss
 
                     # Policy train op
                     # (has to be separate from value train op, because min_qf_pi appears in policy_loss)
@@ -295,6 +307,9 @@ class SAC(OffPolicyRLModel):
                         tf.summary.scalar('ent_coef', self.ent_coef)
 
                     tf.summary.scalar('learning_rate', tf.reduce_mean(self.learning_rate_ph))
+                    tf.summary.scalar('damping_coeff', tf.reduce_mean(self.damping_coeff_ph))
+                    tf.summary.scalar('qf1_old', tf.reduce_mean(self.qf1_old_ph))
+                    tf.summary.scalar('qf2_old', tf.reduce_mean(self.qf2_old_ph))
 
                 # Retrieve parameters that must be saved
                 self.params = find_trainable_variables("model")
@@ -307,10 +322,19 @@ class SAC(OffPolicyRLModel):
 
                 self.summary = tf.summary.merge_all()
 
-    def _train_step(self, step, writer, learning_rate):
+    def _train_step(self, step, writer, learning_rate, damping_coeff):
         # Sample a batch from the replay buffer
         batch = self.replay_buffer.sample(self.batch_size)
         batch_obs, batch_actions, batch_rewards, batch_next_obs, batch_dones = batch
+
+        qf_feed_dict = {
+            self.observations_ph: batch_obs,
+            self.actions_ph: batch_actions,
+            self.next_observations_ph: batch_next_obs
+        }
+
+        # Compute the q-functions with the current parameters.
+        qf1_old, qf2_old = self.sess.run([self.qf1, self.qf2], qf_feed_dict)
 
         feed_dict = {
             self.observations_ph: batch_obs,
@@ -318,7 +342,10 @@ class SAC(OffPolicyRLModel):
             self.next_observations_ph: batch_next_obs,
             self.rewards_ph: batch_rewards.reshape(self.batch_size, -1),
             self.terminals_ph: batch_dones.reshape(self.batch_size, -1),
-            self.learning_rate_ph: learning_rate
+            self.learning_rate_ph: learning_rate,
+            self.damping_coeff_ph: damping_coeff,
+            self.qf1_old_ph: qf1_old,
+            self.qf2_old_ph: qf2_old
         }
 
         # out  = [policy_loss, qf1_loss, qf2_loss,
@@ -357,8 +384,11 @@ class SAC(OffPolicyRLModel):
 
             # Transform to callable if needed
             self.learning_rate = get_schedule_fn(self.learning_rate)
+            self.damping_coeff = get_schedule_fn(self.damping_coeff)
+
             # Initial learning rate
             current_lr = self.learning_rate(1)
+            current_damping_coeff = self.damping_coeff(1)
 
             start_time = time.time()
             episode_rewards = [0.0]
@@ -417,8 +447,9 @@ class SAC(OffPolicyRLModel):
                         # Compute current learning_rate
                         frac = 1.0 - step / total_timesteps
                         current_lr = self.learning_rate(frac)
+                        current_damping_coeff = self.damping_coeff(frac)
                         # Update policy and critics (q functions)
-                        mb_infos_vals.append(self._train_step(step, writer, current_lr))
+                        mb_infos_vals.append(self._train_step(step, writer, current_lr, current_damping_coeff))
                         # Update target network
                         if (step + grad_step) % self.target_update_interval == 0:
                             # Update target network
@@ -491,6 +522,7 @@ class SAC(OffPolicyRLModel):
     def save(self, save_path):
         data = {
             "learning_rate": self.learning_rate,
+            "damping_coeff": self.damping_coeff,
             "buffer_size": self.buffer_size,
             "learning_starts": self.learning_starts,
             "train_freq": self.train_freq,
