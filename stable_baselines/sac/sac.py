@@ -224,11 +224,11 @@ class SAC(OffPolicyRLModel):
 
                     # Compute Q-Function loss
                     # TODO: test with huber loss (it would avoid too high values)
-                    qf1_loss = 0.5 * tf.reduce_mean((q_backup - qf1) ** 2)
-                    qf2_loss = 0.5 * tf.reduce_mean((q_backup - qf2) ** 2)
+                    qf1_loss = 0.5 * tf.reduce_mean((q_backup - self.qf1) ** 2)
+                    qf2_loss = 0.5 * tf.reduce_mean((q_backup - self.qf2) ** 2)
 
-                    qf1_damping_loss = self.damping_coeff_ph * 0.5 * tf.reduce_mean((qf1 - self.qf1_old_ph) ** 2)
-                    qf2_damping_loss = self.damping_coeff_ph * 0.5 * tf.reduce_mean((qf2 - self.qf2_old_ph) ** 2)
+                    qf1_damping_loss = self.damping_coeff_ph * 0.5 * tf.reduce_mean((self.qf1 - self.qf1_old_ph) ** 2)
+                    qf2_damping_loss = self.damping_coeff_ph * 0.5 * tf.reduce_mean((self.qf2 - self.qf2_old_ph) ** 2)
 
                     # Compute the entropy temperature loss
                     # it is used when the entropy coefficient is learned
@@ -286,7 +286,7 @@ class SAC(OffPolicyRLModel):
                         self.infos_names = ['policy_loss', 'qf1_loss', 'qf2_loss', 'value_loss', 'entropy']
                         # All ops to call during one training step
                         self.step_ops = [policy_loss, qf1_loss, qf2_loss,
-                                         value_loss, qf1, qf2, value_fn, logp_pi,
+                                         value_loss, self.qf1, self.qf2, value_fn, logp_pi,
                                          self.entropy, policy_train_op, train_values_op]
 
                         # Add entropy coefficient optimization operation if needed
