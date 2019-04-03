@@ -8,7 +8,7 @@ from stable_baselines import SAC
 env = gym.make('Pendulum-v0')
 env = DummyVecEnv([lambda: env])
 
-model = SAC(MlpPolicy, env, verbose=1, damping_coeff=1.0)
+model = SAC(MlpPolicy, env, verbose=1, q_damping_coeff=1.0)
 model.learn(total_timesteps=50000, log_interval=10)
 model.save("sac_pendulum")
 

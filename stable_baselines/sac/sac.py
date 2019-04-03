@@ -61,7 +61,7 @@ class SAC(OffPolicyRLModel):
         Note: this has no effect on SAC logging for now
     """
 
-    def __init__(self, policy, env, gamma=0.99, learning_rate=3e-4, damping_coeff=0.0, buffer_size=50000,
+    def __init__(self, policy, env, gamma=0.99, learning_rate=3e-4, q_damping_coeff=0.0, policy_damping_coeff=0.0, buffer_size=50000,
                  learning_starts=100, train_freq=1, batch_size=64,
                  tau=0.005, ent_coef='auto', target_update_interval=1,
                  gradient_steps=1, target_entropy='auto', verbose=0, tensorboard_log=None,
@@ -72,7 +72,8 @@ class SAC(OffPolicyRLModel):
 
         self.buffer_size = buffer_size
         self.learning_rate = learning_rate
-        self.damping_coeff = damping_coeff
+        self.q_damping_coeff = q_damping_coeff
+        self.policy_damping_coeff = policy_damping_coeff
         self.learning_starts = learning_starts
         self.train_freq = train_freq
         self.batch_size = batch_size
@@ -116,7 +117,8 @@ class SAC(OffPolicyRLModel):
         self.entropy = None
         self.target_params = None
         self.learning_rate_ph = None
-        self.damping_coeff_ph = None
+        self.q_damping_coeff_ph = None
+        self.policy_damping_coeff_ph = None
         self.qf1_old_ph = None
         self.qf2_old_ph = None
         self.qf1 = None
@@ -158,7 +160,8 @@ class SAC(OffPolicyRLModel):
                     self.actions_ph = tf.placeholder(tf.float32, shape=(None,) + self.action_space.shape,
                                                      name='actions')
                     self.learning_rate_ph = tf.placeholder(tf.float32, [], name="learning_rate_ph")
-                    self.damping_coeff_ph = tf.placeholder(tf.float32, [], name="damping_coeff_ph")
+                    self.q_damping_coeff_ph = tf.placeholder(tf.float32, [], name="q_damping_coeff_ph")
+                    self.policy_damping_coeff_ph = tf.placeholder(tf.float32, [], name="policy_damping_coeff_ph")
                     self.qf1_old_ph = tf.placeholder(tf.float32, shape=(None, 1), name="qf1_old_ph")
                     self.qf2_old_ph = tf.placeholder(tf.float32, shape=(None, 1), name="qf2_old_ph")
 
@@ -227,8 +230,9 @@ class SAC(OffPolicyRLModel):
                     qf1_loss = 0.5 * tf.reduce_mean((q_backup - self.qf1) ** 2)
                     qf2_loss = 0.5 * tf.reduce_mean((q_backup - self.qf2) ** 2)
 
-                    qf1_damping_loss = self.damping_coeff_ph * 0.5 * tf.reduce_mean((self.qf1 - self.qf1_old_ph) ** 2)
-                    qf2_damping_loss = self.damping_coeff_ph * 0.5 * tf.reduce_mean((self.qf2 - self.qf2_old_ph) ** 2)
+                    qf1_damping_loss = self.q_damping_coeff_ph * 0.5 * tf.reduce_mean((self.qf1 - self.qf1_old_ph) ** 2)
+                    qf2_damping_loss = self.q_damping_coeff_ph * 0.5 * tf.reduce_mean((self.qf2 - self.qf2_old_ph) ** 2)
+                    policy_damping_loss = self.policy_damping_coeff_ph * 0.5 * tf.reduce_mean((self.qf2 - self.qf2_old_ph) ** 2)
 
                     # Compute the entropy temperature loss
                     # it is used when the entropy coefficient is learned
@@ -307,7 +311,7 @@ class SAC(OffPolicyRLModel):
                         tf.summary.scalar('ent_coef', self.ent_coef)
 
                     tf.summary.scalar('learning_rate', tf.reduce_mean(self.learning_rate_ph))
-                    tf.summary.scalar('damping_coeff', tf.reduce_mean(self.damping_coeff_ph))
+                    tf.summary.scalar('q_damping_coeff', tf.reduce_mean(self.q_damping_coeff_ph))
                     tf.summary.scalar('qf1_old', tf.reduce_mean(self.qf1_old_ph))
                     tf.summary.scalar('qf2_old', tf.reduce_mean(self.qf2_old_ph))
 
@@ -322,7 +326,7 @@ class SAC(OffPolicyRLModel):
 
                 self.summary = tf.summary.merge_all()
 
-    def _train_step(self, step, writer, learning_rate, damping_coeff):
+    def _train_step(self, step, writer, learning_rate, q_damping_coeff):
         # Sample a batch from the replay buffer
         batch = self.replay_buffer.sample(self.batch_size)
         batch_obs, batch_actions, batch_rewards, batch_next_obs, batch_dones = batch
@@ -343,7 +347,7 @@ class SAC(OffPolicyRLModel):
             self.rewards_ph: batch_rewards.reshape(self.batch_size, -1),
             self.terminals_ph: batch_dones.reshape(self.batch_size, -1),
             self.learning_rate_ph: learning_rate,
-            self.damping_coeff_ph: damping_coeff,
+            self.q_damping_coeff_ph: q_damping_coeff,
             self.qf1_old_ph: qf1_old,
             self.qf2_old_ph: qf2_old
         }
@@ -384,11 +388,11 @@ class SAC(OffPolicyRLModel):
 
             # Transform to callable if needed
             self.learning_rate = get_schedule_fn(self.learning_rate)
-            self.damping_coeff = get_schedule_fn(self.damping_coeff)
+            self.q_damping_coeff = get_schedule_fn(self.q_damping_coeff)
 
             # Initial learning rate
             current_lr = self.learning_rate(1)
-            current_damping_coeff = self.damping_coeff(1)
+            current_q_damping_coeff = self.q_damping_coeff(1)
 
             start_time = time.time()
             episode_rewards = [0.0]
@@ -447,9 +451,9 @@ class SAC(OffPolicyRLModel):
                         # Compute current learning_rate
                         frac = 1.0 - step / total_timesteps
                         current_lr = self.learning_rate(frac)
-                        current_damping_coeff = self.damping_coeff(frac)
+                        current_q_damping_coeff = self.q_damping_coeff(frac)
                         # Update policy and critics (q functions)
-                        mb_infos_vals.append(self._train_step(step, writer, current_lr, current_damping_coeff))
+                        mb_infos_vals.append(self._train_step(step, writer, current_lr, current_q_damping_coeff))
                         # Update target network
                         if (step + grad_step) % self.target_update_interval == 0:
                             # Update target network
@@ -522,7 +526,7 @@ class SAC(OffPolicyRLModel):
     def save(self, save_path):
         data = {
             "learning_rate": self.learning_rate,
-            "damping_coeff": self.damping_coeff,
+            "q_damping_coeff": self.q_damping_coeff,
             "buffer_size": self.buffer_size,
             "learning_starts": self.learning_starts,
             "train_freq": self.train_freq,
